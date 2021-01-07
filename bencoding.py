@@ -56,11 +56,12 @@ def bdecode_int(data: bytes) -> tuple[int, bytes]:
     return int(decoded[1:int_end]), data[int_end + 1:]
 
 
+#  NB: Doesn't enforce lexicographic ordering
 def bencode_dict(data: dict) -> bytes:
     elements = [BEncoding.Dict.encode(encoding='ascii')]
 
     for k, v in data.items():
-        elements.extend([bencode_str(k), bencode_object(v)])
+        elements.extend([bencode_str(k), bencode(v)])
     elements.append(BEncoding.End.encode(encoding='ascii'))
     return b''.join(elements)
 
@@ -74,7 +75,7 @@ def bdecode_dict(data: bytes) -> tuple[dict, bytes]:
     d = {}
     while decoded[0] != BEncoding.End:
         key, data = bdecode_str(data)
-        element, data = bdecode_object(data)
+        element, data = bdecode(data)
         d[key] = element
 
     return d, data
@@ -84,7 +85,7 @@ def bencode_list(data: list) -> bytes:
     elements = [BEncoding.List.encode(encoding='ascii')]
 
     for ele in data:
-        elements.append(bencode_object(ele))
+        elements.append(bencode(ele))
 
     elements.append(BEncoding.End.encode(encoding='ascii'))
     return b''.join(elements)
@@ -97,12 +98,13 @@ def bdecode_list(data: bytes) -> tuple[list, bytes]:
 
     d = []
     while decoded[0] != BEncoding.End:
-        element, data = bdecode_object(data)
+        element, data = bdecode(data)
         d.append(element)
 
     return d, data
 
-def bdecode_object(data: bytes) -> tuple[Union[str, int, dict, list], bytes]:
+
+def bdecode(data: bytes) -> tuple[Union[str, int, dict, list], bytes]:
     indicator = data.decode(encoding='ascii')[0]
 
     if indicator == BEncoding.Integer:
@@ -117,7 +119,7 @@ def bdecode_object(data: bytes) -> tuple[Union[str, int, dict, list], bytes]:
         raise BDecodeError()
 
 
-def bencode_object(data: Union[str, int, dict, list]) -> bytes:
+def bencode(data: Union[str, int, dict, list]) -> bytes:
     if isinstance(data, int):
         return bencode_int(data)
     elif isinstance(data, str):

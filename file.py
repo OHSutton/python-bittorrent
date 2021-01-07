@@ -1,59 +1,110 @@
 import os
 import hashlib
-
+import time
+import math
 
 BlockSize = 2 ** 14  # 16 Kb
 
 
+class InvalidHashException(Exception):
+    pass
+
+
+class InvalidBlock(Exception):
+    pass
+
+
+# Requests will expire if not fulfilled within 15 secs
+# Might be too low/big
+RequestLifespan = 15
+
+
+class BlockRequest:
+    successful: bool = False
+    data: bytes = None
+
+    expiration_time: float = 0.0
+    piece: int = 0
+    begin: int = 0
+    length: int = 0
+
+    def __init__(self, piece: int, begin: int, length: int):
+        self.piece = piece
+        self.begin = begin
+        self.length = length
+
+    def __eq__(self, other):
+        if not isinstance(other, BlockRequest):
+            return False
+
+        return self.__dict__ == other.__dict__
+
+    def start(self):
+        self.expiration_time = time.time() + RequestLifespan
+
+    def expired(self):
+        return time.time() > self.expiration_time
+
+
 class Piece:
-    piece_size: int = 0
+    piece: int = 0
+    total_size: int = 0
     current_size: int = 0
     sha1: bytes = None
     data: bytearray = None
 
-    blocks: list[tuple[int, int]] = []
+    blocks_remaining: int = 0
+    remaining_blocks: list[BlockRequest] = None
+    completed_blocks: list[BlockRequest] = None
 
-    def __init__(self, piece_size: int, sha1_hash: bytes):
-        self.piece_size = piece_size
-        self.data = bytearray(piece_size)
+    def __init__(self, total_size: int, sha1_hash: bytes):
+        self.total_size = total_size
+        self.data = bytearray(total_size)
         self.sha1 = sha1_hash
-
-        # Divide piece into blocks
-        for offset in range(piece_size, BlockSize):
-            self.blocks.append((offset, min(BlockSize, piece_size - offset)))
+        self.generate_requests()
 
     def reset(self):
         """ Clears data in case of Invalid Hash """
-        self.data = bytearray(self.piece_size)
+        self.data = bytearray(self.total_size)
+        self.remaining_blocks.clear()
+        self.current_size = 0
+        self.generate_requests()
 
-    def add_block(self, offset, block):
-        block_len = len(block)
-        block_pos = self.blocks.index((offset, block_len))
-        if block_pos < 0:
-            self.reset()
+    def generate_requests(self):
+        # Divide piece into blocks
+        self.remaining_blocks = []
+        for offset in range(self.total_size, BlockSize):
+            req = BlockRequest(self.piece, offset, min(BlockSize, self.total_size - offset))
+            self.remaining_blocks.append(req)
+            self.blocks_remaining += 1
+
+    def add_block(self, req: BlockRequest):
+
+        block_len = len(req.data)
+        block_pos = self.remaining_blocks.index(req)
+        if block_pos < 0 and req not in self.completed_blocks:
+            raise InvalidBlock()
             # TODO: Log Each reset + reason i.e. MalformedPiece, InvalidHash, etc
-            return False
-
-        self.blocks.pop(block_pos)
-        self.data[offset:offset + block_len] = block
+        self.blocks_remaining -= 1
+        self.data[req.begin:req.begin + block_len] = req.data
         self.current_size += block_len
-        return self.current_size == self.piece_size
 
-    def validate_hash(self):
+    def full(self):
+        return self.total_size == self.current_size
+
+    def valid_hash(self):
         sha1 = hashlib.sha1(bytes(self.data)).digest()
-        if sha1 == self.sha1:
-            return True
-        else:
-            self.reset()
-            # TODO: Log Each reset + reason i.e. MalformedPiece, InvalidHash, etc
-            return False
+        return sha1 == self.sha1
 
 
 class File:
+    info_hash = ""
     piece_loc: dict[int, int] = {}  # Maps piece index -> pos in file
-    incomplete_pieces: dict[int, Piece] = {}  # Maps piece index -> Piece
+    incomplete_pieces: dict[int, Piece] = {}  # Maps piece piece_index -> Piece
     completed_pieces: list[int] = []
+    bitfield = None
 
+    piece_count = 0
     total_pieces: int = 0
     num_completed: int = 0
     path: str = None
@@ -69,8 +120,10 @@ class File:
 
         self.piece_size = piece_size
         self.file_size = file_size
+        self.piece_count = math.ceil(self.file_size / self.piece_size)
         self.remaining = file_size
         self.path = path
+        self.bitfield = [0] * self.piece_count
 
     def init_pieces(self, piece_size: int, piece_hashes: list[bytes]):
         self.piece_size = piece_size
@@ -85,7 +138,7 @@ class File:
     def is_complete(self):
         return self.num_completed == self.total_pieces
 
-    def fetch_block(self, piece_idx: int, offset: int, length: int) -> bytes:
+    def get_block(self, piece_idx: int, offset: int, length: int) -> bytes:
         """ Returns data if the piece is complete, None otherwise"""
         if piece_idx in self.completed_pieces:
             with open(self.path, 'rb') as f:
@@ -93,19 +146,32 @@ class File:
                 data = f.read(length)
             return data
 
-    def add_block(self, piece_idx: int, begin: int, block: bytes) -> int:
+    def add_block(self, req: BlockRequest) -> int:
         """ Returns piece_idx if piece is complete, None otherwise"""
-        if piece_idx in self.completed_pieces:
-            piece = self.incomplete_pieces[piece_idx]
+        if req.piece in self.incomplete_pieces:
+            piece = self.incomplete_pieces[req.piece]
+            piece.add_block(req)
 
-            if piece.add_block(begin, block) and piece.validate_hash():
+            if piece.full() and piece.valid_hash():
                 # Piece is complete & has correct hash -> Write to file
                 with open(self.path, "wb") as f:
-                    f.seek(self.piece_loc[piece_idx])
+                    f.seek(self.piece_loc[req.piece])
                     f.write(bytes(piece.data))
 
                 # Remove data from memory
-                del self.incomplete_pieces[piece_idx]
-                self.completed_pieces.append(piece_idx)
+                del self.incomplete_pieces[req.piece]
+                self.completed_pieces.append(req.piece)
+                self.bitfield[req.piece] = 1
                 self.num_completed += 1
-                return piece_idx
+                return True
+        return False
+
+    def reset_piece(self, piece: int):
+        if piece in self.incomplete_pieces:
+            self.incomplete_pieces[piece].reset()
+            self.bitfield[piece] = 0
+
+    def block_remaining(self, req: BlockRequest):
+        if req.piece in self.incomplete_pieces:
+            return req in self.incomplete_pieces[req.piece].remaining_blocks
+        return False

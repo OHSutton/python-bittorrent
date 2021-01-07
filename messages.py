@@ -2,7 +2,7 @@ import enum
 import struct
 
 
-class InvalidMessage(Exception):
+class MessageParsingError(Exception):
     pass
 
 
@@ -10,7 +10,7 @@ class IncompleteMessage(Exception):
     pass
 
 
-""" Base Types """
+""" Base Datatypes for parsing """
 
 
 class DataType:
@@ -94,6 +94,36 @@ class _Bytes(DataType):
 """ Messages """
 
 
+class Handshake:
+    length = 68  # Size of handshake message
+    pstr = b"BitTorrent protocol"
+    pstrlen = struct.pack(">B", 19)  # 19 = len(pstr)
+
+    @staticmethod
+    def tobytes(info_hash: bytes, peer_id: str) -> bytes:
+        msg = Handshake.pstrlen + Handshake.pstr
+        msg += "\0" * 8  # 8 reserved bytes
+        msg += info_hash  # sha1 hash of infokey in metainfo file
+        msg += bytes(peer_id, 'ascii')  # this client's id
+        return msg
+
+    @staticmethod
+    def validate(buffer: bytes, info_hash: bytes) -> str:
+        """
+        Parses the Peer's handshake msg.  If valud returns peer_id, else
+        throws InvalidMessage Exception
+        """
+        if len(buffer) != Handshake.length:
+            raise MessageParsingError()
+        pstrlen, buffer = _Char.parse(buffer)
+        if pstrlen != Handshake.pstrlen:
+            raise MessageParsingError()
+        pstr, buffer = buffer[:pstrlen].decode('ascii'), buffer[pstrlen:]
+        if pstr != Handshake.pstr or buffer[:20] != info_hash:
+            raise MessageParsingError()
+        return buffer[20:].decode('ascii')
+
+
 class MsgID(enum.Enum):
     KeepAlive = None
     Choke = 0
@@ -122,16 +152,16 @@ class Message:
     @staticmethod
     def parse_first(buffer: bytes):
         if len(buffer) < 4:
-            raise InvalidMessage()
+            raise MessageParsingError()
 
-        length, buffer = _Int.parse(buffer)
+        length, data = _Int.parse(buffer)
         if length == 0:
             # KeepAlive Message
             return KeepAlive()
-        if len(buffer) < length:
+        if len(data) < length:
             raise IncompleteMessage()
 
-        id, buffer = _Char.parse(buffer)
+        id, data = _Char.parse(data)
         msg = MessageMap[id]
 
         # Kinda inelegant so maybe refactor later.
@@ -142,13 +172,13 @@ class Message:
         try:
             for kw, dtype in msg.data.items():
                 # Length only used for bytes type, so can always pass it & decrement
-                value, buffer = dtype.parse(buffer, length)
+                value, data = dtype.parse(data, length)
                 length -= dtype.length
                 setattr(msg, kw, value)
         except:
-            raise InvalidMessage()
+            raise MessageParsingError()
 
-        return msg, buffer
+        return msg, data
 
     def __bytes__(self) -> bytes:
         msg = b''
@@ -177,21 +207,21 @@ class UnChoke(Message):
     }
 
 
-class Interested:
+class Interested(Message):
     data = {
         'length': _Int(1),
         'id': _Char(MsgID.Interested),
     }
 
 
-class NotInterested:
+class NotInterested(Message):
     data = {
         'length': _Int(1),
         'id': _Char(MsgID.NotInterested),
     }
 
 
-class Have:
+class Have(Message):
     data = {
         'length': _Int(5),
         'id': _Char(MsgID.Have),
@@ -199,7 +229,7 @@ class Have:
     }
 
 
-class Bitfield:
+class Bitfield(Message):
     data = {
         'length': _Int(1),
         'id': _Char(MsgID.Bitfield),
@@ -207,7 +237,7 @@ class Bitfield:
     }
 
 
-class Request:
+class Request(Message):
     data = {
         'length': _Int(13),
         'id': _Char(MsgID.Request),
@@ -217,7 +247,7 @@ class Request:
     }
 
 
-class Piece:
+class Piece(Message):
     data = {
         'length': _Int(13),
         'id': _Char(MsgID.Piece),
@@ -227,7 +257,7 @@ class Piece:
     }
 
 
-class Cancel:
+class Cancel(Message):
     data = {
         'length': _Int(13),
         'id': _Char(MsgID.Cancel),
@@ -237,7 +267,7 @@ class Cancel:
     }
 
 
-class Port:
+class Port(Message):
     data = {
         'length': _Int(13),
         'id': _Char(MsgID.Port),
