@@ -20,6 +20,7 @@ RequestLifespan = 15
 
 
 class BlockRequest:
+    rarity: int = 0
     successful: bool = False
     data: bytes = None
 
@@ -41,6 +42,10 @@ class BlockRequest:
 
     def start(self):
         self.expiration_time = time.time() + RequestLifespan
+
+    def reset(self):
+        self.expiration_time = 0.0
+        self.successful = False
 
     def expired(self):
         return time.time() > self.expiration_time
@@ -146,13 +151,16 @@ class File:
                 data = f.read(length)
             return data
 
-    def add_block(self, req: BlockRequest) -> int:
+    def add_block(self, req: BlockRequest):
         """ Returns piece_idx if piece is complete, None otherwise"""
         if req.piece in self.incomplete_pieces:
             piece = self.incomplete_pieces[req.piece]
             piece.add_block(req)
 
-            if piece.full() and piece.valid_hash():
+            if piece.full():
+                if not piece.valid_hash():
+                    raise InvalidHashException()
+
                 # Piece is complete & has correct hash -> Write to file
                 with open(self.path, "wb") as f:
                     f.seek(self.piece_loc[req.piece])
@@ -163,8 +171,6 @@ class File:
                 self.completed_pieces.append(req.piece)
                 self.bitfield[req.piece] = 1
                 self.num_completed += 1
-                return True
-        return False
 
     def reset_piece(self, piece: int):
         if piece in self.incomplete_pieces:

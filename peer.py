@@ -56,7 +56,7 @@ class Peer:
 
     def active(self):
         """ The main running-loop"""
-        while True:
+        while self.session.active:
             try:
                 self.buffer += await asyncio.wait_for(self.reader.read(MAX_BUFFER), EXPIRATION_TIMEOUT)
                 self.last_response = time.time()
@@ -128,11 +128,11 @@ class Peer:
 
     def refresh(self):
         for req in self.pending_requests[:]:
-            if not req.expired():
-                req.successful = True
-            self.completed_requests.put_nowait(req)
-            self.pending_requests.remove(req)
-            self.num_pending -= 1
+            if req.expired():
+                req.successful = False
+                self.completed_requests.put_nowait(req)
+                self.pending_requests.remove(req)
+                self.num_pending -= 1
 
     # Send messages
 

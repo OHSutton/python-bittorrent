@@ -233,7 +233,7 @@ class Bitfield(Message):
     data = {
         'length': _Int(1),
         'id': _Char(MsgID.Bitfield),
-        'bitfield': _Bytes(b''),  # TODO: Maybe create bitarray type?
+        'bitfield': _Bytes(b''),
     }
 
 
