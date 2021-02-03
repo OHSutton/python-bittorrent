@@ -1,41 +1,31 @@
-from file import File
-
-
 class Session:
     active: bool = False
-    file: File = None
-    peer_status: dict[str, bool] = {}
-    peer_pieces: dict[str, list[int]] = []
-
-
-    piece_owners: dict[int, list[str]] = {}
+    num_file_pieces: int = 0
+    # Maps piece num -> peer owners
+    piece_owners: dict[int, set[str]] = {}
+    # Maps piece num -> num peers that own it  (kinda redundant but saves having to repeatedly len() piece_owners)
     piece_counts: dict[int, int] = {}
+
     piece_updated: bool = False
 
-    def __init__(self):
-
-        self.piece_counts = {i: 0 for i in range(self.file.piece_count)}
-        pass
+    def __init__(self, num_file_pieces: int):
+        self.num_file_pieces = num_file_pieces
+        self.piece_counts = {i: 0 for i in range(num_file_pieces)}
+        self.piece_owners = {i: set() for i in range(num_file_pieces)}
 
     def terminate_peer(self, peer_id: str):
-        for piece in self.peer_pieces[peer_id]:
-            self.piece_owners[piece].remove(peer_id)
-            self.piece_counts[piece] -= 1
-        del self.peer_pieces[peer_id]
-        del self.peer_status[peer_id]
-        self.piece_updated = True
-
-    def new_peer(self, peer_id):
-        self.peer_status[peer_id] = True
+        for piece, owners in self.piece_owners.items():
+            if peer_id in owners:
+                self.piece_owners[piece].remove(peer_id)
+                self.piece_counts[piece] -= 1
+                self.piece_updated = True
 
     def add_piece_owner(self, peer_id: str, piece: int):
-        self.piece_owners[piece].append(peer_id)
+        self.piece_owners[piece].add(peer_id)
         self.piece_counts[piece] += 1
         self.piece_updated = True
 
     def register_bitfield(self, peer_id: str, bitfield: list[int]):
         for piece, have in enumerate(bitfield):
             if have:
-                self.piece_owners[piece].append(peer_id)
-                self.piece_counts[piece] += 1
-        self.piece_updated = True
+                self.add_piece_owner(peer_id, piece)

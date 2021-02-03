@@ -1,6 +1,6 @@
 from session import Session
 from file import File, BlockRequest, InvalidHashException
-from peerManager import PeerManager
+from peer_manager import PeerManager
 import time
 import asyncio
 
@@ -10,10 +10,6 @@ MaxPeerRequests = 5
 
 
 class NoPeersException(Exception):
-    pass
-
-
-class IncompleteDownloadException(Exception):
     pass
 
 
@@ -28,7 +24,7 @@ class Downloader:
 
     endgame: bool = False
 
-    interesting_peers = []
+    interesting_peers = set()
 
     def __init__(self, file: File, peer_manager: PeerManager, session: Session, completed_requests: asyncio.Queue):
         self.file = file
@@ -43,55 +39,44 @@ class Downloader:
 
         combined = self.to_request + self.invalid_requests
         self.invalid_requests, self.to_request = [], []
-        raritys = [self.session.piece_counts[req.piece] for req in combined]
+        rarities = [self.session.piece_counts[req.piece] for req in combined]
 
-        for rarity, req in sorted(zip(raritys, combined), key=lambda x: x[0]):
+        for rarity, req in sorted(zip(rarities, combined), key=lambda x: x[0]):
             if rarity:
                 self.to_request.append(req)
             else:
                 self.invalid_requests.append(req)  # No seeders
 
     def set_interesting_peers(self):
-        new_peers = []
-        for peer, pieces in self.session.peer_pieces:
-            for piece in pieces:
-                if piece in self.file.incomplete_pieces:
-                    self.interesting_peers.append(peer)
+        new_interesting_peers = set()
+        for piece in self.file.incomplete_pieces:
+            new_interesting_peers = new_interesting_peers.union(self.session.piece_owners[piece])
 
-        if self.interesting_peers:
-            # If already have interesting peers, tell newly added peers we're interested
-            for new_peer in set(new_peers).difference(set(self.interesting_peers)):
-                self.peer_manager.peers[new_peer].am_interested = True
+        # If already have interesting peers, tell newly added peers we're interested
+        for new_peer in new_interesting_peers.difference(set(self.interesting_peers)):
+            self.peer_manager.peers[new_peer].am_interested = True
 
-            # If not interested in old peers, tell them
-            for new_peer in set(self.interesting_peers).difference(set(new_peers)):
-                self.peer_manager.peers[new_peer].am_interested = False
-        self.interesting_peers = new_peers
+        # If not interested in old peers, tell them
+        for old_peer in self.interesting_peers.difference(new_interesting_peers):
+            self.peer_manager.peers[old_peer].am_interested = False
+
+        self.interesting_peers = new_interesting_peers
 
     def create_requests(self):
         for piece_num, piece in self.file.incomplete_pieces:
             for req in piece.remaining_blocks:
                 self.to_request.append(req)
 
-    def purge_dead_peers(self):
-        for peer_id, alive in self.session.peer_status:
-            if not alive:
-                self.session.terminate_peer(peer_id)
-                peer = self.peer_manager.peers[peer_id]
-                for req in peer.pending_requests:
-                    self.to_request.append(req)
-                self.peer_manager.terminate_peer(peer_id)
-                self.session.piece_updated = True
-
     def wait_for_peers(self):
         # Waits until a peer connects
         sleeping = 0
-        while self.peer_manager.peer_count == 0:
+        while not self.peer_manager.peer_count:
             time.sleep(1)
             sleeping += 1
             if sleeping > MaxPeerWait:
                 raise NoPeersException()
 
+    # Fairly crude request dispensary.  Will need revision
     def send_requests(self):
         for peer_id in self.interesting_peers:
             peer = self.peer_manager.peers[peer_id]
@@ -99,7 +84,7 @@ class Downloader:
             while peer.num_pending < MaxPeerRequests and not peer.peer_choking and self.to_request:
                 num_reqs = len(self.to_request)
                 for req in self.to_request:
-                    if req.piece in self.session.peer_pieces[peer_id]:
+                    if peer_id in self.session.piece_owners[req.piece]:
                         peer.send_request(req)
                         if not self.endgame:
                             self.to_request.remove(req)
@@ -132,7 +117,6 @@ class Downloader:
         self.session.active = False
 
     async def active(self):
-        self.purge_dead_peers()
         self.wait_for_peers()
         self.refresh_rarities()
         self.set_interesting_peers()
@@ -148,7 +132,6 @@ class Downloader:
                     break
 
                 # self.send_cancels(req)  # Do maybe in future
-                self.purge_dead_peers()
                 self.wait_for_peers()
                 if self.session.piece_updated:
                     self.refresh_rarities()
@@ -160,5 +143,3 @@ class Downloader:
                 if self.peer_manager.peer_count == 0:
                     self.shutdown()
                     break
-
-

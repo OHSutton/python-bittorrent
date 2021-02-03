@@ -9,7 +9,7 @@ from bitarray import bitarray
 # Constants
 MAX_BUFFER = 64 * 1024  # 64 kb
 DEAD_TIMEOUT = 2 * 60  # 2 minutes
-EXPIRATION_TIMEOUT = 16  # 15 secs
+HANDSHAKE_WAIT = 15  # seconds
 
 
 class Peer:
@@ -33,32 +33,27 @@ class Peer:
     _peer_choking = True
     _peer_interested = False
 
-    def __init__(self):
-        pass
+    def __init__(self, my_id: str, reader: asyncio.StreamReader = None, writer: asyncio.StreamWriter = None):
+        self.reader = reader
+        self.writer = writer
+        self.my_id = my_id
 
-    def start(self):
-        """
-        Re-Initiates the main running loop in case of premature
-        program termination
-        """
+    async def handshake(self):
         try:
             msg = Handshake.tobytes(self.file.info_hash, self.my_id)
             self.writer.write(msg)
-            self.buffer += await asyncio.wait_for(self.reader.readexactly(Handshake.length), EXPIRATION_TIMEOUT)
+            self.buffer += await asyncio.wait_for(self.reader.readexactly(Handshake.length), HANDSHAKE_WAIT)
             self.their_id = Handshake.validate(self.buffer, self.file.info_hash)
             self.send_bitfield()
-            self.session.register_bitfield(self.their_id, [0] * self.file.piece_count)  # initialise bitarray to 0's
+            return True
         except (asyncio.TimeoutError, MessageParsingError):
-            if self.their_id:
-                self.terminate()
+            return False
 
-        self.active()
-
-    def active(self):
+    async def run(self):
         """ The main running-loop"""
         while self.session.active:
             try:
-                self.buffer += await asyncio.wait_for(self.reader.read(MAX_BUFFER), EXPIRATION_TIMEOUT)
+                self.buffer += await asyncio.wait_for(self.reader.read(MAX_BUFFER), HANDSHAKE_WAIT)
                 self.last_response = time.time()
 
                 while self.buffer:
@@ -67,12 +62,15 @@ class Peer:
 
             except IncompleteMessage:
                 # When the end of a message is clipped. The rest might come through on next read
-                continue
+                pass
             except MessageParsingError:
-                self.terminate()
+                return  # TODO: LOG
             except asyncio.TimeoutError:
                 if not self.connection_alive():
-                    break
+                    return
+            except:
+                # For any unknown error.  # TODO: LOG
+                return
             finally:
                 self.refresh()
 
@@ -82,10 +80,13 @@ class Peer:
     def terminate(self):
         self.writer.close()
         self.session.terminate_peer(self.their_id)
+        for req in self.pending_requests:
+            req.successful = False
+            self.completed_requests.put_nowait(req)
 
     def handle_message(self, msg: Message):
         if msg.id == MsgID.KeepAlive:
-            pass
+            pass  # Ignore
         elif msg.id == MsgID.Choke:
             self.peer_choking = True
         elif msg.id == MsgID.UnChoke:
@@ -110,7 +111,7 @@ class Peer:
                 req.data = msg.block
                 req.successful = True
                 self.completed_requests.put_nowait(req)
-            # if req_pos < 0, ignore for now
+            # if req_pos < 0, ignore.  Indicates delayed response to an expired request
 
         elif msg.id == MsgID.Request:
             # Currently responds to all requests, no specific algo.
@@ -118,12 +119,11 @@ class Peer:
                 block = self.file.get_block(msg.piece, msg.begin, msg.block_length)
                 self.send_piece(msg.piece, msg.begin, block)
 
-
         elif msg.id == MsgID.Cancel:
             # Not useable atm
             pass
         elif msg.id == MsgID.Port:
-            # DHT currently unsupported
+            # DHT not supported
             pass
 
     def refresh(self):
