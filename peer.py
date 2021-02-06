@@ -17,6 +17,9 @@ class Peer:
     their_id: str = ''
     buffer: bytes = b''
 
+    host: int = 0
+    port: int = 0
+
     reader: asyncio.StreamReader = None
     writer: asyncio.StreamWriter = None
     last_response: float = 0

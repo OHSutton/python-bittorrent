@@ -62,7 +62,8 @@ class Piece:
     remaining_blocks: list[BlockRequest] = None
     completed_blocks: list[BlockRequest] = None
 
-    def __init__(self, total_size: int, sha1_hash: bytes):
+    def __init__(self, piece: int, total_size: int, sha1_hash: bytes):
+        self.piece = piece
         self.total_size = total_size
         self.data = bytearray(total_size)
         self.sha1 = sha1_hash
@@ -111,7 +112,7 @@ class File:
 
     piece_count = 0
     total_pieces: int = 0
-    num_completed: int = 0
+    pieces_completed: int = 0
     path: str = None
     file_size: int = 0
     piece_size: int = 0
@@ -135,13 +136,13 @@ class File:
         self.total_pieces = len(piece_hashes)
 
         for piece_idx, sha1 in enumerate(piece_hashes):
-            self.incomplete_pieces[piece_idx] = Piece(
+            self.incomplete_pieces[piece_idx] = Piece(piece_idx,
                 min(piece_size, self.file_size - piece_idx * piece_size), sha1)
 
             self.piece_loc[piece_idx] = piece_idx * piece_size
 
     def is_complete(self):
-        return self.num_completed == self.total_pieces
+        return self.pieces_completed == self.total_pieces
 
     def get_block(self, piece_idx: int, offset: int, length: int) -> bytes:
         """ Returns data if the piece is complete, None otherwise"""
@@ -170,7 +171,7 @@ class File:
                 del self.incomplete_pieces[req.piece]
                 self.completed_pieces.append(req.piece)
                 self.bitfield[req.piece] = 1
-                self.num_completed += 1
+                self.pieces_completed += 1
 
     def reset_piece(self, piece: int):
         if piece in self.incomplete_pieces:

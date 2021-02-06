@@ -1,5 +1,7 @@
 class Session:
     active: bool = False
+
+    uploaded: int = 0
     num_file_pieces: int = 0
     # Maps piece num -> peer owners
     piece_owners: dict[int, set[str]] = {}
