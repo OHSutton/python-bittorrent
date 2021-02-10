@@ -1,4 +1,6 @@
+import bisect
 import hashlib
+import time
 from enum import Enum
 from typing import Union
 
@@ -159,3 +161,87 @@ def parse_metainfo(file_dir: str) -> tuple[dict[str, Union[str, int]], bytes]:
     except:
         # TODO: LOG
         pass
+
+
+class RollingAverage20:
+    times: list[float] = []
+    values: list[int] = []
+    timeframe: int = 20
+
+    def _trim(self):
+        cutoff = time.time() - self.timeframe
+
+        for i in range(len(self.times)-1, -1, -1):
+            if not self.times[i] > cutoff:
+                self.times = self.times[i + 1:]
+                self.values = self.values[i + 1:]
+                return
+
+    def rate(self):
+        self._trim()
+        return sum(self.values) / self.timeframe
+
+    def record(self, value):
+        self.times.append(time.time())
+        self.values.append(value)
+
+
+class PieceTracker:
+    rarities = []
+    pieces = []
+    size = 0
+
+    def __init__(self, total_pieces):
+        self.rarities = [0] * total_pieces
+        self.pieces = [i for i in range(total_pieces)]
+
+    def add(self, rarity, value):
+        pos = bisect.bisect_left(self.rarities, rarity)
+        self.rarities.insert(pos, rarity)
+        self.pieces.insert(pos, value)
+        self.size += 1
+
+    def get_rarity(self, value):
+        pos = bisect.bisect_left(self.pieces, value)
+        return self.rarities[pos]
+
+    def remove(self, value):
+        pos = bisect.bisect_left(self.pieces, value)
+        self.pieces.pop(pos)
+        self.rarities.pop(pos)
+        self.size -= 1
+
+    # Change first instance of value's priority with specified priority
+    # Note in this torrent client all values are unique
+    def update(self, rarity, value):
+        self.remove(value)
+        self.add(rarity, value)
+
+    # Given a list of values, reorders the values in terms of rarity
+    # Most rare-> least rare
+    def raritise(self, values):
+        new_order = []
+        for value in self.pieces:
+            if value in values:
+                new_order.append(value)
+                values.remove(value)
+        return new_order
+
+    # Given a list of values, return value with lowest priority
+    def get_rarest(self, values):
+        for value in self.pieces:
+            if value in values:
+                return value
+
+    def poll(self):
+        if self.size:
+            self.size -= 1
+            self.rarities.pop(0)
+            return self.pieces.pop(0)
+
+    def peek(self):
+        if self.size:
+            return self.pieces[0]
+
+    def __len__(self):
+        return self.size

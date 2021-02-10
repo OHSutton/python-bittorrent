@@ -33,7 +33,6 @@ class PeerManager:
         self.session = session
 
     async def _cold_connect_peer(self, ip: int, port: int):
-        peer = None
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(socket.inet_ntoa(struct.pack("!I", ip)), port), REQUEST_TIMEOUT)
@@ -48,10 +47,6 @@ class PeerManager:
         except Exception as e:
             # Unknown errors # TODO: LOg
             pass
-        finally:
-            # If here peer terminated
-            if peer:
-                peer.terminate()
         return None
 
     async def _start_peer(self, peer: Peer):
@@ -64,11 +59,7 @@ class PeerManager:
             pass  # TODO: Log
         finally:
             # If here peer terminated
-            peer.terminate()
-            del self.peers[peer.their_id]
-            del self.peer_tasks[peer.their_id]
-            self.connected_addrs.remove((peer.host, peer.port))
-            self.peer_count -= 1
+            self.terminate_peer(peer)
 
     async def handle_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         if self.peer_count == self.max_connections:
@@ -87,6 +78,14 @@ class PeerManager:
             return
 
         self.peer_tasks[peer.their_id] = asyncio.ensure_future(self._start_peer(peer))
+
+    def terminate_peer(self, peer: Peer):
+        peer.terminate()
+        del self.peers[peer.their_id]
+        del self.peer_tasks[peer.their_id]
+        self.connected_addrs.remove((peer.host, peer.port))
+        self.peer_count -= 1
+
 
     async def start_server(self):
         # Can take ports in the range 6881-6889 so switch ports if exception

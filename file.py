@@ -16,11 +16,11 @@ class InvalidBlock(Exception):
 
 # Requests will expire if not fulfilled within 15 secs
 # Might be too low/big
-RequestLifespan = 15
+RequestLifespan = 10
 
 
 class BlockRequest:
-    rarity: int = 0
+    completed_by: str = None
     successful: bool = False
     data: bytes = None
 
@@ -46,6 +46,7 @@ class BlockRequest:
     def reset(self):
         self.expiration_time = 0.0
         self.successful = False
+        self.completed_by = ""
 
     def expired(self):
         return time.time() > self.expiration_time
@@ -58,9 +59,8 @@ class Piece:
     sha1: bytes = None
     data: bytearray = None
 
-    blocks_remaining: int = 0
-    remaining_blocks: list[BlockRequest] = None
-    completed_blocks: list[BlockRequest] = None
+    num_blocks_remaining: int = 0
+    remaining_blocks: set[BlockRequest] = set()
 
     def __init__(self, piece: int, total_size: int, sha1_hash: bytes):
         self.piece = piece
@@ -78,20 +78,18 @@ class Piece:
 
     def generate_requests(self):
         # Divide piece into blocks
-        self.remaining_blocks = []
         for offset in range(self.total_size, BlockSize):
             req = BlockRequest(self.piece, offset, min(BlockSize, self.total_size - offset))
-            self.remaining_blocks.append(req)
-            self.blocks_remaining += 1
+            self.remaining_blocks.add(req)
+            self.num_blocks_remaining += 1
 
     def add_block(self, req: BlockRequest):
-
-        block_len = len(req.data)
-        block_pos = self.remaining_blocks.index(req)
-        if block_pos < 0 and req not in self.completed_blocks:
-            raise InvalidBlock()
+        if req not in self.remaining_blocks:
+            return  # Ignore them, might change later idk
             # TODO: Log Each reset + reason i.e. MalformedPiece, InvalidHash, etc
-        self.blocks_remaining -= 1
+        self.remaining_blocks.remove(req)
+        self.num_blocks_remaining -= 1
+        block_len = len(req.data)
         self.data[req.begin:req.begin + block_len] = req.data
         self.current_size += block_len
 
@@ -106,8 +104,9 @@ class Piece:
 class File:
     info_hash = ""
     piece_loc: dict[int, int] = {}  # Maps piece index -> pos in file
-    incomplete_pieces: dict[int, Piece] = {}  # Maps piece piece_index -> Piece
-    completed_pieces: list[int] = []
+    pieces: dict[int, Piece] = {}  # Maps piece piece_index -> Piece
+    incomplete_pieces: set[int] = []
+    completed_pieces: set[int] = []
     bitfield = None
 
     piece_count = 0
@@ -136,7 +135,7 @@ class File:
         self.total_pieces = len(piece_hashes)
 
         for piece_idx, sha1 in enumerate(piece_hashes):
-            self.incomplete_pieces[piece_idx] = Piece(piece_idx,
+            self.pieces[piece_idx] = Piece(piece_idx,
                 min(piece_size, self.file_size - piece_idx * piece_size), sha1)
 
             self.piece_loc[piece_idx] = piece_idx * piece_size
@@ -154,8 +153,8 @@ class File:
 
     def add_block(self, req: BlockRequest):
         """ Returns piece_idx if piece is complete, None otherwise"""
-        if req.piece in self.incomplete_pieces:
-            piece = self.incomplete_pieces[req.piece]
+        if req.piece in self.pieces:
+            piece = self.pieces[req.piece]
             piece.add_block(req)
 
             if piece.full():
@@ -167,18 +166,16 @@ class File:
                     f.seek(self.piece_loc[req.piece])
                     f.write(bytes(piece.data))
 
-                # Remove data from memory
-                del self.incomplete_pieces[req.piece]
-                self.completed_pieces.append(req.piece)
+                self.completed_pieces.add(req.piece)
+                self.incomplete_pieces.remove(req.piece)
                 self.bitfield[req.piece] = 1
                 self.pieces_completed += 1
 
     def reset_piece(self, piece: int):
-        if piece in self.incomplete_pieces:
-            self.incomplete_pieces[piece].reset()
-            self.bitfield[piece] = 0
+        self.pieces[piece].reset()
+        self.bitfield[piece] = 0
 
     def block_remaining(self, req: BlockRequest):
         if req.piece in self.incomplete_pieces:
-            return req in self.incomplete_pieces[req.piece].remaining_blocks
+            return req in self.pieces[req.piece].remaining_blocks
         return False

@@ -80,32 +80,45 @@ class Peer:
     def connection_alive(self):
         return time.time() - self.last_response < DEAD_TIMEOUT
 
-    def terminate(self):
-        self.writer.close()
-        self.session.terminate_peer(self.their_id)
+    def return_block_requests(self):
         for req in self.pending_requests:
             req.successful = False
             self.completed_requests.put_nowait(req)
+        self.pending_requests = []
+
+    def terminate(self):
+        self.writer.close()
+        self.session.terminate_peer(self.their_id)
+        self.return_block_requests()
+
+    def check_if_interesting(self):
+        if self.session.owned_pieces[self.their_id].intersection(self.file.incomplete_pieces):
+            self.session.interesting.add(self.their_id)
+        else:
+            if self.their_id in self.session.interesting:
+                self.session.interesting.remove(self.their_id)
 
     def handle_message(self, msg: Message):
         if msg.id == MsgID.KeepAlive:
             pass  # Ignore
         elif msg.id == MsgID.Choke:
             self.peer_choking = True
+
         elif msg.id == MsgID.UnChoke:
             self.peer_choking = False
         elif msg.id == MsgID.Interested:
             self.peer_interested = True
         elif msg.id == MsgID.NotInterested:
             self.peer_interested = False
-
         elif msg.id == MsgID.Have:
             self.session.add_piece_owner(self.their_id, msg.piece)
+            self.check_if_interesting()
         elif msg.id == MsgID.Bitfield:
             bitarr = bitarray(endian='big')
             bitarr.frombytes(msg.bitfield)
             bitarr = bitarr.tolist(as_ints=True)
             self.session.register_bitfield(self.their_id, bitarr)
+            self.check_if_interesting()
 
         elif msg.id == MsgID.Piece:
             req_pos = self.pending_requests.index(BlockRequest(msg.piece, msg.begin, len(msg.block)))
@@ -113,6 +126,7 @@ class Peer:
                 req = self.pending_requests.pop(req_pos)
                 req.data = msg.block
                 req.successful = True
+                req.completed_by = self.their_id
                 self.completed_requests.put_nowait(req)
             # if req_pos < 0, ignore.  Indicates delayed response to an expired request
 
@@ -133,6 +147,7 @@ class Peer:
         for req in self.pending_requests[:]:
             if req.expired():
                 req.successful = False
+                req.completed_by = self.their_id
                 self.completed_requests.put_nowait(req)
                 self.pending_requests.remove(req)
                 self.num_pending -= 1
@@ -160,6 +175,7 @@ class Peer:
     def send_have(self, piece: int):
         msg = Message.new(MsgID.Have, **{"piece": piece})
         self.writer.write(bytes(msg))
+        self.check_if_interesting()
 
     def send_request(self, req: BlockRequest):
         msg = Message.new(MsgID.Request, **{"piece": req.piece,
@@ -202,4 +218,25 @@ class Peer:
     def am_interested(self, value):
         self.send_interested(value)
         self._am_interested = value
+
+    @property
+    def peer_choking(self):
+        return self._peer_choking
+
+    @peer_choking.setter
+    def peer_choking(self, choked):
+        if choked:
+            self.session.am_choked(self.their_id)
+            self.return_block_requests()
+        else:
+            self.session.am_unchoked(self.their_id)
+        self._peer_choking = choked
+
+    @property
+    def peer_interested(self):
+        return self._peer_interested
+
+    @peer_interested.setter
+    def peer_interested(self, value):
+        self._peer_interested = value
 
